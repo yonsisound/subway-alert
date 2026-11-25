@@ -16,6 +16,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -35,7 +37,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hayoon.subwayalert.data.DataRepository
+import com.hayoon.subwayalert.ride.Phase
 import com.hayoon.subwayalert.ride.RideService
+import com.hayoon.subwayalert.ride.SensorLog
 import com.hayoon.subwayalert.ride.RideState
 import com.hayoon.subwayalert.ride.Stop
 import com.hayoon.subwayalert.route.*
@@ -153,7 +157,7 @@ private fun HomeScreen(net: Network, router: Router, onUpdated: () -> Unit, onRi
         }) { Text(if (updating) "확인 중…" else "노선 업데이트") }
     }
 
-    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
         if (RideService.isRiding(ctx)) {
             Card(Modifier.fillMaxWidth().padding(bottom = 12.dp).clickable { onRide() },
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
@@ -189,7 +193,8 @@ private fun HomeScreen(net: Network, router: Router, onUpdated: () -> Unit, onRi
                 }
             }
         }
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(24.dp))
+        SettingsRow()
         BatteryHint()
         Text("노선 데이터 ${net.generated} (v${net.version}) · OpenStreetMap·서울 열린데이터광장",
             fontSize = 11.sp, color = Color.Gray, modifier = Modifier.padding(vertical = 8.dp))
@@ -319,8 +324,9 @@ private fun DetailScreen(net: Network, router: Router, s: Screen.Detail, onBack:
     Button(onClick = {
         val ps = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
         if (Build.VERSION.SDK_INT >= 33) ps.add(Manifest.permission.POST_NOTIFICATIONS)
+        if (Build.VERSION.SDK_INT >= 29) ps.add(Manifest.permission.ACTIVITY_RECOGNITION)
         perm.launch(ps.toTypedArray())
-    }, modifier = Modifier.fillMaxWidth().padding(16.dp).height(56.dp)) { Text("탑승 시작 (지금 출발)", fontSize = 18.sp) }
+    }, modifier = Modifier.fillMaxWidth().padding(16.dp).height(56.dp)) { Text("안내 시작 (승차 대기)", fontSize = 18.sp) }
     }
 
     pickIdx?.let { idx ->
@@ -370,35 +376,39 @@ private fun RideScreen(net: Network, ride: com.hayoon.subwayalert.ride.RideUi?, 
     val t = ride.tracker; val st = ride.status
     val cur = t.stops[st.current]
     val target = st.nextTarget?.let { t.stops[it] }
+    val curName = net.stations[cur.station]?.name ?: ""
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
         Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
             Column(Modifier.padding(16.dp)) {
-                Text(when {
-                    st.finished -> "도착했어요"
-                    st.waitingTransfer -> "환승 중"
-                    st.atStation -> "지금 정차 중 (추정)"
-                    else -> "방금 지난 역 (추정)"
+                Text(when (st.phase) {
+                    Phase.WAITING -> "승차 대기 중"
+                    Phase.MOVING -> "이동 중"
+                    Phase.AT_STATION -> if (st.atTransfer) "환승 중" else "정차 중"
+                    Phase.FINISHED -> "도착했어요"
                 }, color = Color.Gray)
-                Text(net.stations[cur.station]?.name ?: "", fontSize = 30.sp, fontWeight = FontWeight.Bold)
-                if (target != null && !st.finished) {
-                    val what = if (target.kind == Stop.Kind.DEST) "하차" else "환승"
-                    Text("${net.stations[target.station]?.name} ${what}까지 ${st.stopsToTarget}정거장 · 약 ${fmtMin(st.secToTarget)}",
-                        fontSize = 16.sp, modifier = Modifier.padding(top = 4.dp))
+                Text(if (st.phase == Phase.MOVING) "$curName → ${net.stations[t.stops[st.current + 1].station]?.name}" else curName,
+                    fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                when {
+                    st.phase == Phase.WAITING -> Text("열차가 출발하면 센서로 감지해서 자동으로 안내를 시작해요.", fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp))
+                    st.atTransfer -> Text("환승 열차가 출발하면 자동으로 이어서 안내해요.", fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp))
+                    target != null && !st.finished -> {
+                        val what = if (target.kind == Stop.Kind.DEST) "하차" else "환승"
+                        Text("${net.stations[target.station]?.name} ${what}까지 ${st.stopsToTarget}정거장 · 약 ${fmtMin(st.secToTarget)}",
+                            fontSize = 16.sp, modifier = Modifier.padding(top = 4.dp))
+                    }
                 }
+                if (!ride.sensorOk) Text("⚠ 가속도 센서를 쓸 수 없어 시간·위치로만 안내해요.", fontSize = 12.sp, color = Color.Red)
             }
         }
         Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (st.waitingTransfer)
-                Button(onClick = { RideService.send(ctx, RideService.ACTION_BOARDED) }, Modifier.weight(1f)) { Text("환승 열차 탔어요") }
-            else
-                Button(onClick = { RideService.send(ctx, RideService.ACTION_NEXT) }, Modifier.weight(1f), enabled = !st.finished) { Text("다음 역 도착") }
+            if (st.waiting)
+                OutlinedButton(onClick = { RideService.send(ctx, RideService.ACTION_DEPART) }, Modifier.weight(1f)) { Text("출발했어요") }
             OutlinedButton(onClick = { picking = !picking }, Modifier.weight(1f)) { Text(if (picking) "수정 취소" else "현재 역 수정") }
+            OutlinedButton(onClick = { RideService.send(ctx, RideService.ACTION_STOP); onDone() }, Modifier.weight(1f)) { Text("안내 종료") }
         }
-        OutlinedButton(onClick = { RideService.send(ctx, RideService.ACTION_STOP); onDone() }, Modifier.fillMaxWidth()) { Text("안내 종료") }
         if (picking) Text("아래 목록에서 지금 있는 역을 눌러 주세요.", fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(vertical = 8.dp))
-        else Text("위치 신호가 잡히면 자동 보정돼요. 지하에서 틀리면 '현재 역 수정'으로 맞춰 주세요.",
-            fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(vertical = 8.dp))
+            color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(vertical = 6.dp))
+        else Text("버튼은 감지가 틀렸을 때만 쓰시면 돼요.", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(vertical = 6.dp))
     }
     val listState = rememberLazyListState()
     LaunchedEffect(st.current) { listState.animateScrollToItem(maxOf(0, st.current - 2)) }
@@ -424,4 +434,26 @@ private fun RideScreen(net: Network, ride: com.hayoon.subwayalert.ride.RideUi?, 
             }
         }
     }
+}
+
+// ---------------------------------------------------------------- 설정·기록
+
+@Composable
+private fun SettingsRow() {
+    val ctx = LocalContext.current
+    val prefs = ctx.getSharedPreferences("app", 0)
+    var voice by remember { mutableStateOf(prefs.getBoolean("voice", true)) }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text("음성 안내 (진동·알림음과 함께)", Modifier.weight(1f))
+        Switch(checked = voice, onCheckedChange = { voice = it; prefs.edit().putBoolean("voice", it).apply() })
+    }
+    TextButton(onClick = {
+        val f = SensorLog.latest(ctx)
+        if (f == null) android.widget.Toast.makeText(ctx, "아직 탑승 기록이 없어요.", android.widget.Toast.LENGTH_SHORT).show()
+        else {
+            val uri = androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", f)
+            ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/csv")
+                .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), "탑승 센서 기록 보내기"))
+        }
+    }) { Text("최근 탑승 센서 기록 보내기") }
 }

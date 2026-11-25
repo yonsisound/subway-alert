@@ -1,5 +1,6 @@
 package com.hayoon.subwayalert
 
+import com.hayoon.subwayalert.ride.Phase
 import com.hayoon.subwayalert.ride.RideTracker
 import com.hayoon.subwayalert.route.*
 import org.junit.Assert.*
@@ -50,16 +51,54 @@ class RouterTest {
         println("through " + show(r3)); assertEquals(0, r3.transfers)
     }
 
-    @Test fun tracker() {
-        val r = router.shortest(id("강남"), id("홍대입구"), Mode.MIN_TIME)!!
+    @Test fun tracker() { trackerOn("강남", "홍대입구"); trackerOn("잠실", "서울역"); trackerOn("수원", "잠실") }
+
+    private fun trackerOn(a: String, b: String) {
+        val r = router.shortest(id(a), id(b), Mode.MIN_TIME)!!
+        println("tracker " + show(r))
         val t = RideTracker(net, r)
-        val fired = HashSet<String>()
-        var e = 0
-        while (e < r.totalSec + 300) {
-            t.dueAlerts(e, fired).forEach { fired.add(it.key); println("${e / 60}:${"%02d".format(e % 60)} ${it.title}") }
-            e += 5
+        var now = 1_000_000L
+        t.start(now)
+        val log = ArrayList<String>()
+        fun run(a: List<com.hayoon.subwayalert.ride.Alert>) = a.forEach { log += it.title; println("  ${(now - 1_000_000) / 1000}s ${it.title} / ${it.speech}") }
+        // 승차 대기 5분: 아무 일도 없어야 함
+        now += 300_000; run(t.tick(now)); assertEquals(Phase.WAITING, t.phase)
+        // 매 구간: 출발 → 정차 (신호대기 같은 이른 정차 하나 섞기)
+        while (t.phase != Phase.FINISHED) {
+            if (t.phase == Phase.AT_STATION && t.stops[t.idx].kind == com.hayoon.subwayalert.ride.Stop.Kind.TRANSFER) now += 240_000
+            run(t.onDeparture(now))
+            val hop = t.stops[t.idx + 1].hopSec * 1000L
+            now += 20_000; run(t.onStop(now))           // 너무 이른 정차 → 무시
+            assertEquals(Phase.MOVING, t.phase)
+            now += hop - 20_000; run(t.onStop(now))
+            now += 30_000
         }
-        assertEquals(t.targets.size * 2, fired.size)
-        assertTrue(t.status(r.totalSec + 10).finished)
+        assertEquals(t.targets.size * 2, log.size)
+    }
+
+    @Test fun trackerFallback() {
+        val r = router.shortest(id("강남"), id("시청"), Mode.MIN_TRANSFER)!!
+        val t = RideTracker(net, r); var now = 0L; t.start(now)
+        t.onDeparture(now)
+        // 센서가 전혀 감지 못해도 시간 예비로 끝까지 진행
+        var alerts = 0
+        repeat(2000) { now += 5000; alerts += t.tick(now).size }
+        assertEquals(Phase.FINISHED, t.phase); assertEquals(2, alerts)
+    }
+
+    @Test fun motionDetector() {
+        // 합성 신호: 정지 10s → 가속 8s(0.8m/s²) → 주행 진동 60s → 감속 8s → 정지 10s
+        val ev = ArrayList<String>()
+        val d = com.hayoon.subwayalert.ride.MotionDetector(object : com.hayoon.subwayalert.ride.MotionDetector.Listener {
+            override fun onDeparture(tMs: Long) { ev += "D${tMs / 1000}" }
+            override fun onStop(tMs: Long, longStill: Boolean) { ev += "S${tMs / 1000}" }
+        })
+        val rnd = java.util.Random(1)
+        var tt = 0L
+        fun seg(secs: Int, ax: Double, noise: Double) { repeat(secs * 20) { tt += 50
+            d.feed(tt, (ax + rnd.nextGaussian() * noise).toFloat(), (rnd.nextGaussian() * noise).toFloat(), (9.81 + rnd.nextGaussian() * noise).toFloat(), 0f, 0f, 9.81f) } }
+        seg(10, 0.0, 0.03); seg(8, 0.8, 0.15); seg(60, 0.0, 0.35); seg(8, -0.8, 0.15); seg(10, 0.0, 0.03)
+        println("motion $ev")
+        assertEquals(2, ev.size); assertTrue(ev[0].startsWith("D")); assertTrue(ev[1].startsWith("S"))
     }
 }
