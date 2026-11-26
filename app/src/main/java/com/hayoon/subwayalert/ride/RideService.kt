@@ -56,7 +56,14 @@ class RideService : Service(), LocationListener, SensorEventListener, MotionDete
     private val gyroV = FloatArray(3)
 
     private val tick = object : Runnable {
-        override fun run() { tracker?.let { apply(it.tick(now())) }; publish(); main.postDelayed(this, 5000) }
+        override fun run() {
+            tracker?.let { t ->
+                apply(t.tick(now()))
+                // 도착 후: 걸어서 내린 게 확인되면 1분 뒤, 아니면 5분 뒤 안내 종료
+                if (t.phase == Phase.FINISHED && (now() - t.since > 300_000 || (t.walkedSinceArrival && now() - t.since > 60_000))) { finish(); return }
+            }
+            publish(); main.postDelayed(this, 2000)
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -101,6 +108,9 @@ class RideService : Service(), LocationListener, SensorEventListener, MotionDete
             t.restore(Phase.valueOf(prefs.getString("phase", "WAITING")!!), prefs.getInt("idx", 0),
                 prefs.getLong("since", now()), prefs.getString("fired", "")!!.split(",").filter { it.isNotEmpty() })
         } else t.start(now())
+        t.hasStepSensor = (Build.VERSION.SDK_INT < 29 ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED) &&
+            (getSystemService(SENSOR_SERVICE) as SensorManager).getDefaultSensor(Sensor.TYPE_STEP_DETECTOR) != null
         tracker = t
         save()
         val n = ongoing(t, t.status(now()))
@@ -124,11 +134,9 @@ class RideService : Service(), LocationListener, SensorEventListener, MotionDete
     private fun apply(alerts: List<Alert>) {
         val t = tracker ?: return
         for (a in alerts) { alert(a); log?.event(now(), "ALERT ${a.key}") }
-        detector?.let { d -> if (d.moving != (t.phase == Phase.MOVING)) d.reset(t.phase == Phase.MOVING) }
+        detector?.let { d -> if (d.moving != t.sensorShouldMove) d.reset(t.sensorShouldMove) }
         save()
         publish()
-        if (t.phase == Phase.FINISHED && alerts.isNotEmpty())
-            main.postDelayed({ if (tracker?.phase == Phase.FINISHED) finish() }, 120_000)
     }
 
     private fun save() {
@@ -185,6 +193,7 @@ class RideService : Service(), LocationListener, SensorEventListener, MotionDete
     override fun onWindow(w: MotionDetector.Window) {
         val t = tracker
         log?.window(w, t?.phase?.name ?: "-", t?.idx ?: -1)
+        if (w.steps >= 2) main.post { tracker?.onWalk(w.tMs) }
     }
 
     override fun onDeparture(tMs: Long) {
@@ -262,7 +271,7 @@ class RideService : Service(), LocationListener, SensorEventListener, MotionDete
         val t = tracker ?: return
         if (now() - loc.time > 60_000) return
         val k = t.snap(loc.latitude, loc.longitude, loc.accuracy) ?: return
-        if (k > t.idx) { log?.event(now(), "SNAP $k acc=${loc.accuracy}"); apply(t.onSnap(k, now())) }
+        if (k > t.idx) { log?.event(now(), "SNAP $k acc=${loc.accuracy} ${loc.provider}"); apply(t.onSnap(k, now())) }
     }
 
     @Deprecated("Deprecated in Java")

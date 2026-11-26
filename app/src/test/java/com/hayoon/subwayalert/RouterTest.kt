@@ -64,15 +64,21 @@ class RouterTest {
         // 승차 대기 5분: 아무 일도 없어야 함
         now += 300_000; run(t.tick(now)); assertEquals(Phase.WAITING, t.phase)
         // 매 구간: 출발 → 정차 (신호대기 같은 이른 정차 하나 섞기)
-        while (t.phase != Phase.FINISHED) {
-            if (t.phase == Phase.AT_STATION && t.stops[t.idx].kind == com.hayoon.subwayalert.ride.Stop.Kind.TRANSFER) now += 240_000
+        var guard = 0
+        while (t.phase != Phase.FINISHED && guard++ < 500) {
+            if (t.phase == Phase.AT_STATION && t.stops[t.idx].kind == com.hayoon.subwayalert.ride.Stop.Kind.TRANSFER) {
+                now += 60_000; t.onWalk(now); now += 180_000
+            }
             run(t.onDeparture(now))
             val hop = t.stops[t.idx + 1].hopSec * 1000L
-            now += 20_000; run(t.onStop(now))           // 너무 이른 정차 → 무시
+            now += 20_000; run(t.onStop(now))           // 너무 이른 멈춤 → 무시
+            now += 15_000; run(t.onStop(now)); now += 4_000; run(t.onDeparture(now))   // 서행(4초 정지) → 무시
             assertEquals(Phase.MOVING, t.phase)
-            now += hop - 20_000; run(t.onStop(now))
-            now += 30_000
+            now += hop - 39_000; run(t.onStop(now))
+            now += 10_000; run(t.tick(now))               // 8초 이상 정지 → 확정
+            now += 20_000
         }
+        assertEquals(Phase.FINISHED, t.phase)
         assertEquals(t.targets.size * 2, log.size)
     }
 
@@ -137,5 +143,39 @@ class RouterTest {
         seg(20, 0.0, 0.03); seg(12, 0.6, 0.12); seg(60, 0.0, 0.3); seg(10, -0.6, 0.12); seg(20, 0.0, 0.03)
         println("gyro-motion ${rec.ev}")
         assertEquals(listOf("D", "S"), rec.ev.map { it.take(1) })
+    }
+
+    /** 실제 탑승 기록 재생 (개인 기록이라 저장소에는 없음: -Dreplay=경로 로 지정) */
+    @Test fun replayRealRide() {
+        val path = System.getProperty("replay") ?: System.getenv("REPLAY") ?: return
+        val f = File(path); if (!f.exists()) return
+        // 첫 줄: #출발역,환승역,첫노선,도착역,둘째노선
+        val head = f.readLines().first().removePrefix("#").split(",")
+        val r1 = router.shortest(id(head[0]), id(head[1]), Mode.MIN_TRANSFER, endLine = head[2])!!
+        val r2 = router.shortest(id(head[1]), id(head[3]), Mode.MIN_TRANSFER, startLine = head[4])!!
+        val r = Route(r1.legs + r2.legs, r1.transferSecs + net.transferAt(id(head[1])) + r2.transferSecs)
+        val t = RideTracker(net, r); t.start(0)
+        var lastIdx = -1; var lastPhase: Phase? = null
+        fun report(now: Long, why: String, a: List<com.hayoon.subwayalert.ride.Alert>) {
+            if (t.idx != lastIdx || t.phase != lastPhase || a.isNotEmpty()) {
+                println("%6ds %-10s %2d %-14s %s %s".format(now / 1000, t.phase, t.idx, net.stations[t.stops[t.idx].station]!!.name.take(10), why, a.joinToString { it.title }))
+                lastIdx = t.idx; lastPhase = t.phase
+            }
+        }
+        var clock = 0L
+        for (line in f.readLines().drop(1)) {
+            val p = line.split(","); val tm = p[0].toLong()
+            while (clock + 2000 < tm) { clock += 2000; report(clock, "tick", t.tick(clock)) }
+            clock = tm
+            when (p[1]) {
+                // 감지기 상태와 맞지 않는 이벤트는 새 구조에선 생길 수 없으므로 건너뜀
+                "D" -> if (!t.sensorShouldMove) report(tm, "DEPART", t.onDeparture(tm))
+                "S" -> if (t.sensorShouldMove) report(tm, "STOP", t.onStop(tm))
+                "L" -> if (t.sensorShouldMove) report(tm, "STOP_LONG", t.onStop(tm, true))
+                "P" -> report(tm, "SNAP ${p[2]}", t.onSnap(p[2].toInt(), tm))
+                "W" -> t.onWalk(tm)
+            }
+        }
+        repeat(200) { clock += 2000; report(clock, "tick", t.tick(clock)) }
     }
 }
