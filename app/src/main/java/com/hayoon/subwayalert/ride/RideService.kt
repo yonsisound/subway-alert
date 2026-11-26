@@ -51,10 +51,9 @@ class RideService : Service(), LocationListener, SensorEventListener, MotionDete
     private var log: SensorLog? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private val prefs by lazy { getSharedPreferences("ride", 0) }
-    private val grav = FloatArray(3)
-    private var hasGravitySensor = false
-    private var gravInit = false
     private var sensorOk = false
+    private var lastRaw = 0L
+    private val gyroV = FloatArray(3)
 
     private val tick = object : Runnable {
         override fun run() { tracker?.let { apply(it.tick(now())) }; publish(); main.postDelayed(this, 5000) }
@@ -157,7 +156,7 @@ class RideService : Service(), LocationListener, SensorEventListener, MotionDete
         val th = sensorThread ?: HandlerThread("sensors").also { it.start(); sensorThread = it }
         val h = Handler(th.looper)
         sm.registerListener(this, acc, 50_000, h)   // 20Hz
-        sm.getDefaultSensor(Sensor.TYPE_GRAVITY)?.let { hasGravitySensor = true; sm.registerListener(this, it, 50_000, h) }
+        sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let { sm.registerListener(this, it, 100_000, h) }
         if (Build.VERSION.SDK_INT < 29 ||
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED)
             sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL, h) }
@@ -168,16 +167,14 @@ class RideService : Service(), LocationListener, SensorEventListener, MotionDete
         val d = detector ?: return
         val t = now()
         when (e.sensor.type) {
-            Sensor.TYPE_GRAVITY -> { grav[0] = e.values[0]; grav[1] = e.values[1]; grav[2] = e.values[2]; gravInit = true }
-            Sensor.TYPE_STEP_DETECTOR -> d.step(t)
+            Sensor.TYPE_GYROSCOPE -> { gyroV[0] = e.values[0]; gyroV[1] = e.values[1]; gyroV[2] = e.values[2]; d.gyro(t, e.values[0], e.values[1], e.values[2]) }
+            Sensor.TYPE_STEP_DETECTOR -> { d.step(t); log?.raw(t, "step") }
             Sensor.TYPE_ACCELEROMETER -> {
-                if (!hasGravitySensor) { // 중력 추정: 느린 저역통과 (약 8초)
-                    val a = if (gravInit) 0.006f else 1f
-                    for (k in 0..2) grav[k] = grav[k] + a * (e.values[k] - grav[k])
-                    gravInit = true
+                d.feed(t, e.values[0], e.values[1], e.values[2])
+                if (t - lastRaw >= 100) { // 원본 10Hz 기록 (기준값 조정용)
+                    lastRaw = t
+                    log?.raw(t, "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f".format(e.values[0], e.values[1], e.values[2], gyroV[0], gyroV[1], gyroV[2]))
                 }
-                if (!gravInit) return
-                d.feed(t, e.values[0], e.values[1], e.values[2], grav[0], grav[1], grav[2])
             }
         }
     }

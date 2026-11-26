@@ -451,9 +451,20 @@ private fun SettingsRow() {
         val f = SensorLog.latest(ctx)
         if (f == null) android.widget.Toast.makeText(ctx, "아직 탑승 기록이 없어요.", android.widget.Toast.LENGTH_SHORT).show()
         else {
-            val uri = androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", f)
-            ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/csv")
-                .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), "탑승 센서 기록 보내기"))
+            val uris = ArrayList(listOfNotNull(f, SensorLog.rawOf(f)).map {
+                androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", it)
+            })
+            ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND_MULTIPLE).setType("text/csv")
+                .putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), "탑승 센서 기록 보내기"))
         }
     }) { Text("최근 탑승 센서 기록 보내기") }
+    if (Build.VERSION.SDK_INT >= 29 && androidx.core.content.ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACTIVITY_RECOGNITION)
+        != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+        val req = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+            if (!it) ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}")))
+        }
+        OutlinedButton(onClick = { req.launch(Manifest.permission.ACTIVITY_RECOGNITION) }, modifier = Modifier.fillMaxWidth()) {
+            Text("신체 활동 권한 허용 (걸음 감지)")
+        }
+    }
 }

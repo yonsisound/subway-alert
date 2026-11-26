@@ -80,7 +80,8 @@ class RideTracker(val net: Network, val route: Route) {
     fun onStop(now: Long, longStill: Boolean = false): List<Alert> {
         if (phase != Phase.MOVING) return emptyList()
         val exp = stops[idx + 1].hopSec * 1000L
-        val ratio = if (longStill) 0.7 else 0.45
+        // 감속 없이 오래 멈춘 경우는 신호대기일 수 있어 예상 시간이 다 지난 뒤에만 인정
+        val ratio = if (longStill) 1.0 else 0.45
         if (now - since < exp * ratio) return emptyList()   // 너무 이르면 터널 내 신호대기로 간주
         return arrive(idx + 1, now, estimated = false)
     }

@@ -86,19 +86,56 @@ class RouterTest {
         assertEquals(Phase.FINISHED, t.phase); assertEquals(2, alerts)
     }
 
-    @Test fun motionDetector() {
-        // 합성 신호: 정지 10s → 가속 8s(0.8m/s²) → 주행 진동 60s → 감속 8s → 정지 10s
+    private class Rec : com.hayoon.subwayalert.ride.MotionDetector.Listener {
         val ev = ArrayList<String>()
-        val d = com.hayoon.subwayalert.ride.MotionDetector(object : com.hayoon.subwayalert.ride.MotionDetector.Listener {
-            override fun onDeparture(tMs: Long) { ev += "D${tMs / 1000}" }
-            override fun onStop(tMs: Long, longStill: Boolean) { ev += "S${tMs / 1000}" }
-        })
-        val rnd = java.util.Random(1)
+        override fun onDeparture(tMs: Long) { ev += "D${tMs / 1000}" }
+        override fun onStop(tMs: Long, longStill: Boolean) { ev += (if (longStill) "L" else "S") + "${tMs / 1000}" }
+    }
+
+    @Test fun motionDetector() {
+        // 정지 20s → 가속 12s(0.6m/s²) → 주행 진동 60s → 감속 10s → 정지 20s, 휴대폰은 비스듬히(중력이 y,z에 분산)
+        val rec = Rec(); val d = com.hayoon.subwayalert.ride.MotionDetector(rec)
+        val rnd = java.util.Random(1); var tt = 0L
+        fun seg(secs: Int, a: Double, noise: Double) { repeat(secs * 20) { tt += 50
+            d.feed(tt, (a + rnd.nextGaussian() * noise).toFloat(), (6.94 + rnd.nextGaussian() * noise).toFloat(), (6.94 + rnd.nextGaussian() * noise).toFloat()) } }
+        seg(20, 0.0, 0.03); seg(12, 0.6, 0.12); seg(60, 0.0, 0.3); seg(10, -0.6, 0.12); seg(20, 0.0, 0.03)
+        println("motion ${rec.ev}")
+        assertEquals(listOf("D", "S"), rec.ev.map { it.take(1) })
+    }
+
+    @Test fun motionRotationNoFalseDeparture() {
+        // 정지 상태에서 휴대폰을 뒤집음(중력 방향 변화 + 자이로) → 출발로 착각하면 안 됨
+        val rec = Rec(); val d = com.hayoon.subwayalert.ride.MotionDetector(rec)
         var tt = 0L
-        fun seg(secs: Int, ax: Double, noise: Double) { repeat(secs * 20) { tt += 50
-            d.feed(tt, (ax + rnd.nextGaussian() * noise).toFloat(), (rnd.nextGaussian() * noise).toFloat(), (9.81 + rnd.nextGaussian() * noise).toFloat(), 0f, 0f, 9.81f) } }
-        seg(10, 0.0, 0.03); seg(8, 0.8, 0.15); seg(60, 0.0, 0.35); seg(8, -0.8, 0.15); seg(10, 0.0, 0.03)
-        println("motion $ev")
-        assertEquals(2, ev.size); assertTrue(ev[0].startsWith("D")); assertTrue(ev[1].startsWith("S"))
+        repeat(400) { tt += 50; d.feed(tt, 0f, 0f, 9.81f) }
+        repeat(40) { k -> tt += 50; val ang = Math.PI / 2 * (k + 1) / 40
+            d.gyro(tt, 1.5f, 0f, 0f); d.feed(tt, 0f, (9.81 * Math.sin(ang)).toFloat(), (9.81 * Math.cos(ang)).toFloat()) }
+        repeat(600) { tt += 50; d.feed(tt, 0f, 9.81f, 0f) }
+        println("rotation ${rec.ev}")
+        assertTrue(rec.ev.isEmpty())
+    }
+
+    @Test fun motionSlowTiltNoFalseDeparture() {
+        // 조는 동안 휴대폰이 10초에 걸쳐 15° 천천히 기울어짐 (자이로 0.026rad/s, 회전 판정 기준 아래)
+        val rec = Rec(); val d = com.hayoon.subwayalert.ride.MotionDetector(rec)
+        var tt = 0L
+        repeat(400) { tt += 50; d.gyro(tt, 0f, 0f, 0f); d.feed(tt, 0f, 0f, 9.81f) }
+        val total = Math.toRadians(15.0); val rate = total / 10.0
+        repeat(200) { k -> tt += 50; val ang = total * (k + 1) / 200
+            d.gyro(tt, rate.toFloat(), 0f, 0f); d.feed(tt, 0f, (9.81 * Math.sin(ang)).toFloat(), (9.81 * Math.cos(ang)).toFloat()) }
+        repeat(600) { tt += 50; d.gyro(tt, 0f, 0f, 0f); d.feed(tt, 0f, (9.81 * Math.sin(total)).toFloat(), (9.81 * Math.cos(total)).toFloat()) }
+        println("slowtilt ${rec.ev}")
+        assertTrue(rec.ev.isEmpty())
+    }
+
+    @Test fun motionWithGyroStillDetects() {
+        val rec = Rec(); val d = com.hayoon.subwayalert.ride.MotionDetector(rec)
+        val rnd = java.util.Random(2); var tt = 0L
+        fun seg(secs: Int, a: Double, noise: Double) { repeat(secs * 20) { tt += 50
+            d.gyro(tt, (rnd.nextGaussian() * 0.01).toFloat(), (rnd.nextGaussian() * 0.01).toFloat(), (rnd.nextGaussian() * 0.01).toFloat())
+            d.feed(tt, (a + rnd.nextGaussian() * noise).toFloat(), (rnd.nextGaussian() * noise).toFloat(), (9.81 + rnd.nextGaussian() * noise).toFloat()) } }
+        seg(20, 0.0, 0.03); seg(12, 0.6, 0.12); seg(60, 0.0, 0.3); seg(10, -0.6, 0.12); seg(20, 0.0, 0.03)
+        println("gyro-motion ${rec.ev}")
+        assertEquals(listOf("D", "S"), rec.ev.map { it.take(1) })
     }
 }
